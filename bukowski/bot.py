@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import discord
@@ -10,12 +11,11 @@ from discord.ext import tasks
 from .config import Config
 from .store import Store, Actor, DomainError
 from .periods import now, period
-from .ocr import TesseractReader, parse_prices
+from .ocr import TesseractReader, parse_prices, ReadingError
+from .branding import Brand, money, STATES, SYNC_STATES
+from .nicknames import nickname
 
 log = logging.getLogger(__name__)
-
-def money(cents):
-    return f"${Decimal(cents)/100:.2f}"
 
 async def answer(interaction, text, **kwargs):
     text = text[:1950]
@@ -51,14 +51,15 @@ class Panel(discord.ui.View):
         super().__init__(timeout=None)
         self.bot, self.kind, self.record = bot, kind, record
         actions = {
-            'service': [('Solicitar registro','register'),('Consultar meu cadastro','status')],
-            'work': [('Retirar sementes','withdraw'),('Retiradas abertas','open'),('Registrar venda','quote'),('Repasses pendentes','pending'),('Informar entrega','report')],
+            'service': [('Apresentar documentos','register'),('Consultar meu cadastro','status')],
+            'work': [('Retirar sementes','withdraw'),('Registrar venda','quote'),('Minhas retiradas','open'),('Meus repasses','pending'),('Informar entrega','report')],
             'admin': [('Taxa da fazenda','rate'),('Rendimento','yield'),('Corrigir tabela','table'),('Consultar pendências','finance'),('Confirmar ou rejeitar entrega','receive')],
             'registration': [('Aprovar','approve'),('Recusar','reject')],
             'quote': [('Confirmar venda calculada','sell')],
         }[kind]
-        for label, action in actions:
-            button = discord.ui.Button(label=label, custom_id=f'bukowski:{kind}:{record or 0}:{action}', style=discord.ButtonStyle.secondary)
+        for index,(label, action) in enumerate(actions):
+            style = discord.ButtonStyle.success if action in ('register','approve','withdraw','sell') else discord.ButtonStyle.danger if action == 'reject' else discord.ButtonStyle.secondary
+            button = discord.ui.Button(label=label, custom_id=f'bukowski:{kind}:{record or 0}:{action}', style=style,row=0 if index < 3 else 1)
             async def callback(interaction, action=action):
                 try:
                     await self.bot.action(interaction, action, self.record)
@@ -69,6 +70,25 @@ class Panel(discord.ui.View):
                     await answer(interaction,'Operação não concluída. Consulte a gerência antes de tentar novamente.')
             button.callback = callback
             self.add_item(button)
+        if kind == 'admin':
+            menu = discord.ui.Select(placeholder='Outros registros e revisões',custom_id='bukowski:admin:operations',row=2,options=[
+                discord.SelectOption(label='Cadastros e apelidos pendentes',value='registrations'),
+                discord.SelectOption(label='Tentar completar contratação',value='retry_registration'),
+                discord.SelectOption(label='Sincronizar apelido',value='sync_nickname'),
+                discord.SelectOption(label='Cancelar retirada com motivo',value='cancel_withdrawal'),
+                discord.SelectOption(label='Ajustar caixa com motivo',value='adjust_cash'),
+                discord.SelectOption(label='Estornar lançamento',value='reverse_cash'),
+                discord.SelectOption(label='Consultar auditoria',value='audit_records')])
+            async def selected(interaction):
+                try:
+                    await self.bot.action(interaction,menu.values[0])
+                except (DomainError,ValueError,InvalidOperation) as error:
+                    await answer(interaction,str(error))
+                except Exception:
+                    log.exception('Falha no menu administrativo')
+                    await answer(interaction,'Operação não concluída. Consulte a gerência.')
+            menu.callback = selected
+            self.add_item(menu)
 
 class Tree(app_commands.CommandTree):
     async def interaction_check(self, interaction):
@@ -84,11 +104,18 @@ class Bukowski(discord.Client):
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions(everyone=False,roles=False,users=False))
         self.config = config
         self.store = Store(config.database,config.admins,config.finance)
-        self.reader = reader or TesseractReader(config.ocr_lang,config.tesseract)
+        self.brand = Brand(config)
+        if config.ocr_backend == 'gemini':
+            from .vision import GeminiReader
+            self.reader = reader or GeminiReader(config.vision_key,config.vision_model)
+        else:
+            self.reader = reader or TesseractReader(config.ocr_lang,config.tesseract)
         self.tree = Tree(self)
         self.install_lock = asyncio.Lock()
         self.scan_lock = asyncio.Lock()
         self.ocr_slots = asyncio.Semaphore(2)
+        self.nickname_locks = {}
+        self.recovered_processing = False
         self.commands()
 
     async def actor(self, interaction):
@@ -120,8 +147,10 @@ class Bukowski(discord.Client):
             return
         async with self.scan_lock:
             # Recovery: replay current-period images; message uniqueness prevents double work.
-            for row in self.store.rows("SELECT id FROM tables WHERE state='processing'"):
-                self.store.db.execute("UPDATE tables SET state='pending',error='Processamento interrompido; valide manualmente' WHERE id=?",(row['id'],))
+            if not self.recovered_processing:
+                for row in self.store.rows("SELECT id FROM tables WHERE state='processing'"):
+                    self.store.db.execute("UPDATE tables SET state='pending',error_code='ocr_service',error='Processamento interrompido; valide manualmente' WHERE id=?",(row['id'],))
+                self.recovered_processing = True
             channel = self.get_channel(self.config.channels['PRICES_CHANNEL'])
             if channel:
                 try:
@@ -129,6 +158,98 @@ class Bukowski(discord.Client):
                         await self.on_message(message)
                 except discord.HTTPException:
                     log.exception('Não foi possível recuperar imagens do período')
+        await self.refresh_panels()
+        requests = self.get_channel(self.config.channels['REQUESTS_CHANNEL'])
+        if requests:
+            try:
+                async for message in requests.history(limit=None):
+                    if message.author.id != self.user.id or not message.embeds:
+                        continue
+                    match = re.fullmatch(r'(?:Solicitação #|DOCUMENTOS À MESA • #)(\d+)',message.embeds[0].title or '')
+                    if match and self.store.one('SELECT id FROM registrations WHERE id=?',(int(match[1]),)):
+                        self.store.db.execute('INSERT OR IGNORE INTO request_messages VALUES(?,?,?)',(int(match[1]),requests.id,message.id))
+                        await self.update_request_messages(int(match[1]),message)
+            except discord.HTTPException:
+                log.warning('Solicitações antigas não puderam ser reconciliadas; use /solicitacao para pendentes')
+        for row in self.store.rows("SELECT * FROM registrations WHERE status='approved'"):
+            try:
+                await self.sync_member(dict(row),Actor(self.user.id))
+            except (DomainError,discord.HTTPException):
+                log.warning('Apelido pendente no cadastro #%s; consulte /cadastros',row['id'])
+
+    async def sync_member(self, row, actor, record=True):
+        lock = self.nickname_locks.setdefault(row['user'],asyncio.Lock())
+        async with lock:
+            guild = self.get_guild(self.config.guild)
+            try:
+                member = await guild.fetch_member(row['user'])
+                current = self.store.one('SELECT * FROM registrations WHERE id=?',(row['id'],))
+                if current:
+                    row = dict(current)
+                target = nickname(row['name'],row['document'],{r.id for r in member.roles},self.config.role_rules(),self.config.nickname_format)
+                if target is None:
+                    if record:
+                        self.store.identity_result(actor,row['id'],'nickname','unmapped','Nenhum cargo possui prefixo definido; apelido preservado.')
+                    return None
+                if member.nick != target:
+                    bot_member = guild.me
+                    if not bot_member.guild_permissions.manage_nicknames or member.id == guild.owner_id or member.top_role >= bot_member.top_role:
+                        raise DomainError('Não posso alterar esse apelido. Confira Gerenciar Apelidos e a posição do bot acima do membro; o dono do servidor não pode ter o apelido alterado pelo bot.')
+                    await member.edit(nick=target,reason=f'Sincronização do cadastro #{row["id"]}; responsável {actor.id}')
+                if record:
+                    latest = self.store.one('SELECT * FROM registrations WHERE id=?',(row['id'],))
+                    if latest and (latest['name'],latest['document']) != (row['name'],row['document']):
+                        raise DomainError('Cadastro mudou durante o ajuste do apelido; tente novamente.')
+                    self.store.identity_result(actor,row['id'],'nickname','synced')
+                return target
+            except discord.Forbidden:
+                error = DomainError('Discord recusou o apelido. Confira Gerenciar Apelidos e hierarquia.')
+                if record:
+                    self.store.identity_result(actor,row['id'],'nickname','failed',str(error))
+                raise error
+            except (DomainError,discord.HTTPException) as error:
+                if record:
+                    self.store.identity_result(actor,row['id'],'nickname','failed',str(error) if isinstance(error,DomainError) else 'Falha na API Discord; tente novamente.')
+                raise
+
+    async def on_member_update(self, before, after):
+        if after.guild.id != self.config.guild or {r.id for r in before.roles} == {r.id for r in after.roles}:
+            return
+        row = self.store.one("SELECT * FROM registrations WHERE user=? AND status='approved'",(after.id,))
+        if row:
+            try:
+                await self.sync_member(dict(row),Actor(self.user.id))
+            except (DomainError,discord.HTTPException):
+                await self.update_request_messages(row['id'])
+                log.warning('Falha de sincronização de apelido; cadastro #%s',row['id'])
+
+    async def update_request_messages(self, registration, source=None):
+        row = self.store.one('SELECT * FROM registrations WHERE id=?',(registration,))
+        if source is not None:
+            self.store.db.execute('INSERT OR IGNORE INTO request_messages VALUES(?,?,?)',(registration,source.channel.id,source.id))
+        for saved in self.store.rows('SELECT * FROM request_messages WHERE registration=?',(registration,)):
+            try:
+                message = source if source and source.id == saved['message'] else await self.get_channel(saved['channel']).fetch_message(saved['message'])
+                avatar = message.embeds[0].thumbnail.url if message.embeds and message.embeds[0].thumbnail else None
+                view = Panel(self,'registration',registration)
+                if row['status'] != 'pending':
+                    for button in view.children:
+                        button.disabled = True
+                await message.edit(embed=self.brand.registration(dict(row),avatar),view=view)
+            except (discord.HTTPException,AttributeError):
+                log.warning('Não foi possível atualizar solicitação #%s',registration)
+
+    async def refresh_panels(self):
+        async with self.install_lock:
+            for row in self.store.rows('SELECT * FROM panels'):
+                try:
+                    channel = self.get_channel(row['channel'])
+                    message = await channel.fetch_message(row['message'])
+                    embed = self.brand.panel(row['kind'],self.store)
+                    if not message.embeds or message.embeds[0].to_dict() != embed.to_dict() or message.content:
+                        await message.edit(content=None,embed=embed,view=Panel(self,row['kind']))
+                except (discord.HTTPException,AttributeError):
+                    log.warning('Painel %s indisponível; /instalar permite recuperá-lo',row['kind'])
 
     async def notify(self, user_id, text):
         try:
@@ -144,11 +265,10 @@ class Bukowski(discord.Client):
     async def publish_request(self, registration):
         r = self.store.one('SELECT * FROM registrations WHERE id=?',(registration,))
         user = await self.fetch_user(r['user'])
-        embed = discord.Embed(title=f'Solicitação #{registration}', description=f'<@{user.id}>',color=0x997133)
-        embed.set_thumbnail(url=user.display_avatar.url)
-        for label, value in [('Personagem',r['name']),('Documento',r['document']),('Pombo/correio',r['mail'])]:
-            embed.add_field(name=label,value=discord.utils.escape_markdown(value))
-        await self.get_channel(self.config.channels['REQUESTS_CHANNEL']).send(embed=embed,view=Panel(self,'registration',registration))
+        embed = self.brand.registration(dict(r),user.display_avatar.url)
+        message = await self.get_channel(self.config.channels['REQUESTS_CHANNEL']).send(embed=embed,view=Panel(self,'registration',registration))
+        self.store.db.execute('INSERT OR IGNORE INTO request_messages VALUES(?,?,?)',(registration,message.channel.id,message.id))
+        await self.refresh_panels()
 
     async def form(self, interaction, title, labels, action):
         await interaction.response.send_modal(Form(self,title,labels,action))
@@ -168,23 +288,34 @@ class Bukowski(discord.Client):
             await self.form(i,'Livro de registro',[('Nome do personagem',False),('ID/documento no jogo',False),('Pombo/correio',False)],submit)
         elif action == 'status':
             r = s.one('SELECT * FROM registrations WHERE user=? ORDER BY id DESC LIMIT 1',(a.id,))
-            await answer(i, f"Cadastro #{r['id']}: {r['status']}. Motivo: {r['reason'] or '—'}" if r else 'Nenhum cadastro registrado.')
+            await answer(i, f"Cadastro #{r['id']}: {STATES.get(r['status'],r['status'])}.\nPeão: {SYNC_STATES.get(r['role_state'],r['role_state'])}. Apelido: {SYNC_STATES.get(r['nickname_state'],r['nickname_state'])}.\n{r['sync_error'] or r['reason'] or ''}" if r else 'Nenhum cadastro registrado.')
         elif action == 'approve':
             s.admin(a)
-            await i.response.defer(ephemeral=True)
+            if not i.response.is_done():
+                await i.response.defer(ephemeral=True)
             async def grant(user):
                 member = await i.guild.fetch_member(user)
-                role = i.guild.get_role(self.config.p1)
+                role = i.guild.get_role(self.config.peao)
                 if role is None:
-                    raise DomainError('Cargo P1 não encontrado.')
-                await member.add_roles(role,reason=f'Cadastro #{record} aprovado por {a.id}')
-            user = await s.approve(a,record,grant)
-            await self.notify(user,'Seu registro na Fazenda Bukowski foi aprovado. Cargo P1 concedido.')
-            await answer(i,'Registro aprovado e cargo P1 concedido.')
+                    raise DomainError('Cargo Peão não encontrado.')
+                if role not in member.roles:
+                    if not i.guild.me.guild_permissions.manage_roles or role >= i.guild.me.top_role:
+                        raise DomainError('Confira Gerenciar Cargos e posição do bot acima de Peão.')
+                    await member.add_roles(role,reason=f'Cadastro #{record} aprovado por {a.id}')
+            try:
+                user = await s.approve(a,record,grant,lambda row:self.sync_member(row,a,record=False))
+            finally:
+                await self.update_request_messages(record,getattr(i,'message',None))
+                await self.refresh_panels()
+            await self.notify(user,'Seu registro na Fazenda Bukowski foi aprovado. Cargo Peão e apelido atualizados.')
+            await answer(i,'Registro aprovado. Peão concedido e apelido sincronizado.')
         elif action == 'reject':
             s.admin(a)
+            source = getattr(i,'message',None)
             async def submit(i,a,v):
                 user = await s.reject(a,record,v[0])
+                await self.update_request_messages(record,source)
+                await self.refresh_panels()
                 await self.notify(user,f'Seu registro foi recusado. Motivo: {v[0]}')
                 await answer(i,'Solicitação recusada com motivo registrado.')
             await self.form(i,'Recusar registro',[('Motivo',True)],submit)
@@ -202,11 +333,12 @@ class Bukowski(discord.Client):
             s.approved(a)
             async def submit(i,a,v):
                 q = s.quote(a,int(v[0]))
-                await answer(i,f"Cálculo da retirada #{q['withdrawal']}: {q['units']} unidades × {money(q['price'])} = {money(q['total'])}.\nTaxa guardada: {q['rate']}%. Fazenda: {money(q['farm'])}. Funcionário: {money(q['employee'])}.\nEste cálculo usa sementes, rendimento e tabela; não comprova a venda no jogo. A confirmação fecha a retirada completa.",view=Panel(self,'quote',q['id']))
+                await answer(i,'Confira o acerto antes de confirmar.',embed=self.brand.quote(q),view=Panel(self,'quote',q['id']))
             await self.form(i,'Calcular venda',[('ID da retirada aberta',False)],submit)
         elif action == 'sell':
             payment = s.sell(a,record)
-            await answer(i,f'Venda calculada registrada. Repasse #{payment} pendente; informe a entrega após entregar o dinheiro.')
+            await self.refresh_panels()
+            await answer(i,f'Venda calculada registrada. Repasse #{payment} pendente; informe a entrega após entregar o dinheiro.',embed=self.payment_embed(payment))
         elif action == 'pending':
             await answer(i,self.pending_text(a.id))
         elif action == 'report':
@@ -215,16 +347,17 @@ class Bukowski(discord.Client):
                 if not self.config.finance.intersection(r.id for r in receiver.roles):
                     raise DomainError('Quem recebeu precisa ter cargo financeiro autorizado.')
                 s.report_payment(a,int(v[0]),receiver.id)
-                await answer(i,'Entrega informada. O caixa só será creditado após confirmação da gerência.')
+                await self.refresh_panels()
+                await answer(i,'Entrega informada. O caixa só será creditado após confirmação da gerência.',embed=self.payment_embed(int(v[0])))
                 try:
-                    await self.get_channel(self.config.channels['LOG_CHANNEL']).send(f'Entrega informada: repasse #{v[0]}, funcionário <@{a.id}>, recebedor <@{receiver.id}>. Gerência: use /recebimento.')
+                    await self.get_channel(self.config.channels['LOG_CHANNEL']).send(embed=self.payment_embed(int(v[0])))
                 except discord.HTTPException:
                     log.exception('Aviso de entrega falhou; pendência permanece consultável')
             await self.form(i,'Informar entrega',[('ID do repasse',False),('ID Discord de quem recebeu',False)],submit)
         elif action == 'rate':
             s.admin(a)
             async def submit(i,a,v):
-                s.set_rate(a,v[0]); await answer(i,'Taxa configurada para novas retiradas.')
+                s.set_rate(a,v[0]); await self.refresh_panels(); await answer(i,'Taxa configurada para novas retiradas.')
             await self.form(i,'Taxa da fazenda',[('Percentual de 0 a 100',False)],submit)
         elif action == 'yield':
             s.admin(a)
@@ -235,6 +368,7 @@ class Bukowski(discord.Client):
             s.admin(a)
             async def submit(i,a,v):
                 tid = s.manual_table(a,parse_prices(v[0]),v[1],int(v[2]) if v[2] else None)
+                await self.refresh_panels()
                 await answer(i,f'Tabela #{tid} validada com histórico.')
             form = Form(self,'Tabela manual', [('Produto: $0.10 (uma linha por produto)',True),('Motivo da correção/publicação',True),('ID pendente; vazio para nova tabela',False)],submit)
             form.children[2].required = False
@@ -248,12 +382,68 @@ class Bukowski(discord.Client):
                 if v[1].casefold() not in ('confirmar','rejeitar'):
                     raise DomainError('Digite confirmar ou rejeitar.')
                 s.receive(a,int(v[0]),v[1].casefold()=='confirmar',v[2])
-                await answer(i,'Decisão financeira registrada.')
+                await self.refresh_panels()
+                await answer(i,'Decisão financeira registrada.',embed=self.payment_embed(int(v[0])))
             await self.form(i,'Recebimento',[('ID do repasse',False),('confirmar ou rejeitar',False),('Motivo (obrigatório para rejeitar)',True)],submit)
+        elif action == 'registrations':
+            s.admin(a)
+            rows = s.rows("SELECT * FROM registrations WHERE status='pending' OR nickname_state='failed' ORDER BY id")
+            await answer(i,'\n'.join(f"#{r['id']} — {r['name']} | documento {r['document']} | pombo {r['mail']}\n{r['sync_error'] or 'Aguardando decisão'}" for r in rows) or 'Nenhum cadastro ou apelido pendente.')
+        elif action in ('retry_registration','sync_nickname'):
+            s.admin(a)
+            async def submit(i,a,v):
+                rid = int(v[0])
+                if action == 'retry_registration':
+                    await self.action(i,'approve',rid)
+                    return
+                row = s.one("SELECT * FROM registrations WHERE id=? AND status='approved'",(rid,))
+                if not row:
+                    raise DomainError('Cadastro aprovado não encontrado.')
+                target = await self.sync_member(dict(row),a)
+                await self.update_request_messages(rid)
+                await answer(i,f'Apelido sincronizado: {target}' if target else 'Cargo sem prefixo; apelido preservado.')
+            await self.form(i,'Revisar identidade',[('ID do cadastro',False)],submit)
+        elif action == 'cancel_withdrawal':
+            s.admin(a)
+            async def submit(i,a,v):
+                s.cancel_withdrawal(a,int(v[0]),v[1])
+                await answer(i,'Retirada cancelada com histórico.')
+            await self.form(i,'Revisar retirada',[('ID da retirada',False),('Motivo',True)],submit)
+        elif action in ('adjust_cash','reverse_cash'):
+            s.cashier(a)
+            async def submit(i,a,v):
+                if action == 'reverse_cash':
+                    lid = s.adjust(a,0,v[1],reverse=int(v[0]))
+                else:
+                    amount = Decimal(v[0].replace(',','.'))
+                    if not amount.is_finite() or amount != amount.quantize(Decimal('.01')):
+                        raise DomainError('Informe valor com até duas casas decimais.')
+                    lid = s.adjust(a,int(amount*100),v[1])
+                await self.refresh_panels()
+                await answer(i,f'Lançamento #{lid} registrado com histórico.')
+            await self.form(i,'Revisar caixa',[('ID do lançamento' if action=='reverse_cash' else 'Valor assinado (ex.: -10,00)',False),('Motivo',True)],submit)
+        elif action == 'audit_records':
+            s.admin(a)
+            await answer(i,'\n'.join(f"#{r['id']} | {r['created']} | {r['actor']} | {r['event']} | {r['payload']}" for r in s.rows('SELECT * FROM audit ORDER BY id DESC LIMIT 8')) or 'Sem eventos.')
 
     def pending_text(self, user=None):
         rows = self.store.rows("SELECT * FROM payments WHERE state!='received'" + (' AND user=?' if user else '') + ' ORDER BY id',(user,) if user else ())
-        return '\n'.join(f"#{r['id']} — funcionário {r['user']}: {money(r['amount'])}; {r['state']}" for r in rows) or 'Nenhum repasse pendente.'
+        return '\n'.join(f"#{r['id']} — funcionário {r['user']}: {money(r['amount'])}; {'Pendente' if r['state']=='pending' else STATES.get(r['state'],r['state'])}" for r in rows) or 'Nenhum repasse pendente.'
+
+    def payment_embed(self, payment):
+        row = self.store.one('SELECT p.*,s.withdrawal,s.price,s.total,s.farm,s.employee,w.product,w.seeds,w.yield,w.rate FROM payments p JOIN sales s ON s.id=p.sale JOIN withdrawals w ON w.id=s.withdrawal WHERE p.id=?',(payment,))
+        q = dict(row); q['units'] = q['seeds']*q['yield']
+        embed = self.brand.quote(q)
+        embed.title = f'REPASSE NO LIVRO • #{payment}'
+        embed.description = 'Pendente' if row['state']=='pending' else STATES.get(row['state'],row['state'])
+        embed.remove_field(9)
+        self.brand.field(embed,'Funcionário',f"<@{row['user']}>",True)
+        if row['receiver']:
+            self.brand.field(embed,'Entrega informada a',f"<@{row['receiver']}>",True)
+        if row['confirmed_by']:
+            self.brand.field(embed,'Confirmado por',f"<@{row['confirmed_by']}> • {row['confirmed_at']}")
+        self.brand.field(embed,'Caixa','Crédito confirmado.' if row['state']=='received' else 'Ainda não houve crédito no caixa.')
+        return embed
 
     async def on_message(self, message):
         await self.process_prices(message)
@@ -279,27 +469,47 @@ class Bukowski(discord.Client):
         if tid is None:
             return
         raw, prices, error = '', {}, None
+        error_code, partial, diagnostic = None,{},''
         try:
             if len(attachments) != 1 or attachments[0].size > 10_000_000:
-                raise ValueError('Envie uma única imagem de até 10 MB por mensagem.')
+                raise ReadingError('unsupported_format','Envie uma única imagem de até 10 MB por mensagem.')
             async with self.ocr_slots:
-                data = await attachments[0].read()
+                try:
+                    data = await attachments[0].read()
+                except (discord.HTTPException,OSError,asyncio.TimeoutError):
+                    raise ReadingError('attachment_download','Não foi possível baixar o anexo. Envie a imagem novamente.')
                 raw, prices = await asyncio.to_thread(self.reader.read,data)
-        except Exception as exc:
+        except ReadingError as exc:
             error = str(exc)[:1000]
             raw = getattr(exc,'raw_text','')
+            error_code,partial,diagnostic = exc.code,exc.partial,exc.diagnostic
+            prices = partial
+        except Exception as exc:
+            error_code = 'ocr_service'
+            error = 'Falha inesperada no serviço de leitura. Tente novamente ou solicite revisão.'
+            diagnostic = type(exc).__name__  # No keys, request URLs or arbitrary exception bodies.
         state = self.store.finish_table(tid,actor,raw,prices,error)
-        states = {'valid':'validada','pending':'aguardando revisão','expired':'fora do período atual'}
-        table = '\n'.join(f'{p}: {money(c)}' for p,c in prices.items())
+        self.store.db.execute('UPDATE tables SET error_code=? WHERE id=?',(error_code,tid))
+        row = dict(self.store.one('SELECT * FROM tables WHERE id=?',(tid,)))
         try:
-            await message.reply((f'Tabela #{tid}: {states.get(state,state)}.\n' + (table if prices else 'Não foi possível ler com segurança todos os produtos e preços.') + '\nA vigência usa a publicação; o horário da captura no jogo não é comprovado.\n' + ('Gerência: consulte o motivo em /tabelas; use /tabela reler ou /tabela manual.' if state != 'valid' else ''))[:1950],mention_author=False)
+            if state == 'valid':
+                embed = self.brand.prices(row,prices,message.jump_url)
+            else:
+                detail = error or ('O período da publicação encerrou; publique uma nova imagem.' if state == 'expired' else 'Leitura concluída, mas o autor não possui cargo autorizado para ativar a tabela.')
+                embed = self.brand.reading_issue(tid,error_code,detail)
+            await message.reply(embed=embed,mention_author=False)
             if state == 'pending':
-                await self.get_channel(self.config.channels['LOG_CHANNEL']).send(f'Tabela #{tid} pendente: {message.jump_url}. {error or "Autor sem cargo administrativo"}. Use /tabelas e /tabela manual.')
+                admin_embed = self.brand.reading_issue(tid,error_code,error or 'Autor sem cargo administrativo.',partial or prices)
+                self.brand.field(admin_embed,'Diagnóstico privado',f'Categoria: {error_code or "author_unauthorized"}\n{diagnostic}\n{raw[:700]}')
+                self.brand.field(admin_embed,'Mensagem original',message.jump_url)
+                await self.get_channel(self.config.channels['LOG_CHANNEL']).send(embed=admin_embed)
         except discord.HTTPException:
             log.exception('Resposta da tabela falhou; extração foi persistida')
+        await self.refresh_panels()
 
     @tasks.loop(seconds=30)
     async def restart_watch(self):
+        await self.refresh_panels()
         p = period(now())
         if self.store.one('SELECT period FROM notices WHERE period=?',(p,)):
             return
@@ -331,8 +541,7 @@ class Bukowski(discord.Client):
         if member.guild.id != self.config.guild:
             return
         phrases = ['Um novo forasteiro cruzou as porteiras da Fazenda Bukowski.','Há passos novos na estrada. Identifique-se no atendimento, forasteiro.','As porteiras se abriram para mais um viajante. Respeite esta terra e sua gente.']
-        embed = discord.Embed(title='As porteiras se abrem',description=f'{member.mention}\n{random.choice(phrases)}\nSolicite seu registro em <#{self.config.channels["SERVICE_CHANNEL"]}>.')
-        embed.set_thumbnail(url=member.display_avatar.url)
+        embed = self.brand.arrival(member,random.choice(phrases))
         await self.get_channel(self.config.channels['ARRIVALS_CHANNEL']).send(embed=embed)
 
     async def on_member_remove(self, member):
@@ -343,8 +552,7 @@ class Bukowski(discord.Client):
             self.store.audit(Actor(member.id),'membro_saiu',{'type':'saída'})
         phrases = ['Um nome foi riscado do livro da Fazenda Bukowski. Sua estrada agora segue longe destas porteiras.','Mais um deixou nosso círculo. A fazenda segue, e o livro guarda sua passagem.','As porteiras se fecharam para este forasteiro. Seu vínculo com a fazenda chegou ao fim.']
         # Conservatively reports departure: no inference of kick/ban from leaving.
-        embed = discord.Embed(title='Saída',description=f'{member.mention}\n{random.choice(phrases)}')
-        embed.set_thumbnail(url=member.display_avatar.url)
+        embed = self.brand.arrival(member,random.choice(phrases),leaving=True)
         await self.get_channel(self.config.channels['ARRIVALS_CHANNEL']).send(embed=embed)
 
     def validate_channels(self, guild):
@@ -359,14 +567,14 @@ class Bukowski(discord.Client):
             ch = guild.get_channel(self.config.channels[key])
             if ch.permissions_for(guild.default_role).view_channel:
                 raise DomainError(f'{key}: negue Ver canal a @everyone antes de iniciar.')
-        role = guild.get_role(self.config.p1)
+        role = guild.get_role(self.config.peao)
         if not role or role.is_default() or role.managed:
-            raise DomainError('P1 deve ser um cargo comum válido.')
+            raise DomainError('Peão deve ser um cargo comum válido.')
         if role.permissions.administrator:
-            raise DomainError('P1 não deve possuir permissão Administrador.')
+            raise DomainError('Peão não deve possuir permissão Administrador.')
         for key in ('REQUESTS_CHANNEL','LOG_CHANNEL'):
             if guild.get_channel(self.config.channels[key]).permissions_for(role).view_channel:
-                raise DomainError(f'{key}: P1 não pode visualizar informações administrativas.')
+                raise DomainError(f'{key}: Peão não pode visualizar informações administrativas.')
 
     async def install(self, i):
         actor = await self.actor(i)
@@ -378,6 +586,7 @@ class Bukowski(discord.Client):
         async with self.install_lock:
             for kind,key,text in [('service','SERVICE_CHANNEL','Livro da Fazenda Bukowski — solicite registro ou consulte seu cadastro.'),('work','WORK_CHANNEL','Painel de trabalho — retiradas, vendas calculadas e repasses.'),('admin','LOG_CHANNEL','Gerência — taxas, rendimentos, tabelas e financeiro. Comandos adicionais: /cadastro_corrigir, /retirada_cancelar, /ajuste, /estorno, /auditoria.')]:
                 channel = guild.get_channel(self.config.channels[key])
+                embed = self.brand.panel(kind,self.store)
                 row = self.store.one('SELECT * FROM panels WHERE kind=?',(kind,))
                 msg = None
                 if row:
@@ -389,13 +598,13 @@ class Bukowski(discord.Client):
                         pass
                 if msg is None:
                     async for old in channel.history(limit=None):
-                        if old.author.id == self.user.id and old.content == text:
+                        if old.author.id == self.user.id and (old.content == text or (old.embeds and old.embeds[0].title == embed.title)):
                             msg = old
                             break
                 if msg:
-                    await msg.edit(content=text,view=Panel(self,kind))
+                    await msg.edit(content=None,embed=embed,view=Panel(self,kind))
                 else:
-                    msg = await channel.send(text,view=Panel(self,kind))
+                    msg = await channel.send(embed=embed,view=Panel(self,kind))
                 self.store.db.execute('INSERT OR REPLACE INTO panels VALUES(?,?,?)',(kind,channel.id,msg.id))
             self.store.audit(actor,'paineis_instalados',{})
         await answer(i,'Painéis instalados/atualizados sem duplicação. Nenhum canal foi alterado.')
@@ -420,11 +629,13 @@ class Bukowski(discord.Client):
         @taxa.command(name='definir',description='Define taxa para novas retiradas')
         async def rate_set(i:discord.Interaction,percentual:str):
             s.set_rate(await self.actor(i),percentual)
+            await self.refresh_panels()
             await answer(i,'Taxa definida para novas retiradas.')
         @taxa.command(name='consultar',description='Consulta a taxa configurada')
         async def rate_get(i:discord.Interaction):
             await self.actor(i)
-            await answer(i,f"Taxa da fazenda: {s.get_setting('rate') or 'não configurada'}%")
+            rate = s.get_setting('rate')
+            await answer(i,f'Taxa da fazenda: {rate}%' if rate is not None else 'Taxa da fazenda não configurada; retiradas bloqueadas.')
         tree.add_command(taxa)
 
         rendimento = app_commands.Group(name='rendimento',description='Produção por semente')
@@ -470,7 +681,32 @@ class Bukowski(discord.Client):
         @tree.command(name='tabelas',description='Lista tabelas recentes para revisão')
         async def tables(i:discord.Interaction):
             s.admin(await self.actor(i))
-            await answer(i,'\n'.join(f"#{r['id']} — {r['state']} — {r['published']} — {r['error'] or ''}" for r in s.rows('SELECT * FROM tables ORDER BY id DESC LIMIT 15')) or 'Nenhuma tabela.')
+            await answer(i,'\n'.join(f"#{r['id']} — {r['state']} — {r['published']} — {r['error_code'] or '—'} — {r['error'] or ''}" for r in s.rows('SELECT * FROM tables ORDER BY id DESC LIMIT 15')) or 'Nenhuma tabela.')
+
+        @tree.command(name='ocr_diagnostico',description='Verifica executável e idiomas do OCR; resposta privada')
+        async def ocr_diagnose(i:discord.Interaction):
+            s.admin(await self.actor(i))
+            await i.response.defer(ephemeral=True)
+            result = await asyncio.to_thread(self.reader.diagnose)
+            await answer(i,json.dumps(result,ensure_ascii=False))
+
+        @tree.command(name='cadastro_tentar',description='Tenta completar cargo Peão e apelido de cadastro pendente')
+        async def retry_registration(i:discord.Interaction,cadastro:int):
+            await self.action(i,'approve',cadastro)
+
+        @tree.command(name='apelido_sincronizar',description='Tenta novamente sincronizar apelido com cadastro e cargos atuais')
+        async def nickname_sync(i:discord.Interaction,cadastro:int):
+            actor = await self.actor(i)
+            s.admin(actor)
+            row = s.one("SELECT * FROM registrations WHERE id=? AND status='approved'",(cadastro,))
+            if not row:
+                raise DomainError('Cadastro aprovado não encontrado; pendentes usam /cadastro_tentar.')
+            await i.response.defer(ephemeral=True)
+            try:
+                target = await self.sync_member(dict(row),actor)
+            finally:
+                await self.update_request_messages(cadastro)
+            await answer(i,f'Apelido sincronizado: {target}' if target else 'Cargo sem prefixo configurado. Apelido atual preservado.')
 
         @tree.command(name='trabalho',description='Consulta retiradas abertas')
         async def work(i:discord.Interaction):
@@ -502,12 +738,13 @@ class Bukowski(discord.Client):
         @tree.command(name='recebimento',description='Confirma ou rejeita uma entrega informada')
         async def receive(i:discord.Interaction,repasse:int,confirmar:bool,motivo:str=''):
             s.receive(await self.actor(i),repasse,confirmar,motivo)
-            await answer(i,'Decisão financeira registrada.')
+            await self.refresh_panels()
+            await answer(i,'Decisão financeira registrada.',embed=self.payment_embed(repasse))
 
         @tree.command(name='cadastros',description='Consulta cadastros pendentes privados')
         async def registrations(i:discord.Interaction):
             s.admin(await self.actor(i))
-            await answer(i,'\n'.join(f"#{r['id']} — Discord {r['user']} — {r['name']} — documento {r['document']} — correio {r['mail']}" for r in s.rows("SELECT * FROM registrations WHERE status='pending' ORDER BY id")) or 'Nenhum cadastro pendente.')
+            await answer(i,'\n'.join(f"#{r['id']} — Discord {r['user']} — {r['name']} — documento {r['document']} — pombo {r['mail']}\nPeão: {r['role_state']} | Apelido: {r['nickname_state']} | {r['sync_error'] or '—'}" for r in s.rows("SELECT * FROM registrations WHERE status='pending' OR nickname_state='failed' ORDER BY id")) or 'Nenhum cadastro ou apelido pendente.')
 
         @tree.command(name='solicitacao',description='Republica botões de uma solicitação pendente')
         async def request(i:discord.Interaction,cadastro:int):
@@ -521,8 +758,18 @@ class Bukowski(discord.Client):
 
         @tree.command(name='cadastro_corrigir',description='Corrige cadastro preservando histórico')
         async def correct(i:discord.Interaction,cadastro:int,nome:str,documento:str,correio:str,motivo:str):
-            s.correct_registration(await self.actor(i),cadastro,nome,documento,correio,motivo)
-            await answer(i,'Cadastro corrigido com histórico.')
+            actor = await self.actor(i)
+            s.correct_registration(actor,cadastro,nome,documento,correio,motivo)
+            await i.response.defer(ephemeral=True)
+            row = s.one('SELECT * FROM registrations WHERE id=?',(cadastro,))
+            try:
+                if row['status'] == 'approved':
+                    await self.sync_member(dict(row),actor)
+            except (DomainError,discord.HTTPException):
+                await answer(i,'Cadastro corrigido com histórico; apelido pendente. Confira /cadastros e use /apelido_sincronizar após resolver a hierarquia.')
+            else:
+                await answer(i,'Cadastro corrigido com histórico.' + (' Apelido sincronizado.' if row['status']=='approved' else ' O apelido será sincronizado na aprovação.'))
+            await self.update_request_messages(cadastro)
 
         @tree.command(name='retirada_cancelar',description='Revisão administrativa de perda/cancelamento completo')
         async def cancel(i:discord.Interaction,retirada:int,motivo:str):
@@ -535,11 +782,13 @@ class Bukowski(discord.Client):
             if not amount.is_finite() or amount != amount.quantize(Decimal('.01')):
                 raise DomainError('Informe dinheiro com no máximo duas casas decimais.')
             lid = s.adjust(await self.actor(i),int(amount*100),motivo)
+            await self.refresh_panels()
             await answer(i,f'Ajuste #{lid} lançado: {money(int(amount*100))}.')
 
         @tree.command(name='estorno',description='Estorna uma entrada/ajuste uma única vez')
         async def reverse(i:discord.Interaction,lancamento:int,motivo:str):
             lid = s.adjust(await self.actor(i),0,motivo,reverse=lancamento)
+            await self.refresh_panels()
             await answer(i,f'Estorno #{lid} registrado. A dívida original permanece no histórico; eventual nova cobrança exige revisão.')
 
         @tree.command(name='auditoria',description='Consulta os últimos eventos privados da auditoria')

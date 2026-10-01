@@ -2,8 +2,8 @@
 
 Executado em 01/10/2026 com Python 3.11.9, discord.py 2.7.1 e Tesseract 5.5.3 (modelos por+eng). Dependências isoladas em `.venv`; OCR local em `.tools/tesseract`, ignorado pelo Git. Não foi usado token Discord.
 
-- 34 testes automatizados passaram, sem testes pulados, incluindo OCR real da imagem sintética de referência e dos cartões com Junco/Romã/Pitanga, cabeçalho, subtítulos e botões Vender.
-- Cadastro autorizado/não autorizado; concessão de P1 com falha e nova tentativa; decisão simultânea; saída durante aprovação; conflitos de documento e correção auditada.
+- 53 testes automatizados passaram, sem testes pulados, incluindo OCR real das imagens sintéticas com Chuchu/Alho/Inhame e Junco/Romã/Pitanga, cabeçalho, rótulos e botões Vender.
+- Cadastro autorizado/não autorizado; concessão de Peão com falha e nova tentativa; decisão simultânea; saída durante aprovação; conflitos de documento e correção auditada.
 - Persistência e migração inicial; instalação idempotente de painéis e recuperação de envio interrompido usando Discord simulado.
 - Limites 06h/12h/18h, noite atravessando meia-noite, conversão UTC, bot retomando após reinício perdido.
 - OCR dos três pares fornecidos; imagem inválida, texto ambíguo, autor não autorizado, conclusão após fronteira e publicação fora de ordem.
@@ -11,6 +11,11 @@ Executado em 01/10/2026 com Python 3.11.9, discord.py 2.7.1 e Tesseract 5.5.3 (m
 - Centavos e arredondamento HALF_UP; taxa obrigatória e limites; rendimento/taxa históricos; nova tabela exige nova confirmação.
 - Venda/recebimento duplicados; recebimentos concorrentes em conexões SQLite distintas; rejeição seguida de nova entrega; cancelamento e estorno único.
 - Compilação do código e `pip check` sem dependências quebradas.
+- Reforma: cargo Peão e apelido a partir do documento; prioridade de Gerente; promoção/rebaixamento; somente nome truncado; hierarquia/dono do servidor; estado parcial e nova tentativa; correção cadastral; solicitação original atualizada com botões desabilitados.
+- Migração versão 1 → 2: comparação de todos os campos antigos de cadastros, retiradas, vendas, pagamentos, caixa, histórico e painéis; backup consistente da versão 1 verificado.
+- OCR sem VOCÊ TEM, sem quantidade e sem relógio; referência sintética em 900 e 685 pixels; categorias de OCR indisponível, formato inválido e falha de download; nenhum detalhe privado na resposta pública.
+- Backend visual Gemini: implementação HTTP real, contrato de transporte testado com resposta controlada, chave ausente e resposta incompleta rejeitadas. Nenhuma chamada real ao provedor foi realizada.
+- Embeds: conteúdos exportados em EMBEDS.md e examples/embeds.json; testes de limites de campos/caracteres e persistência. Não houve validação visual no Discord.
 
 Comando usado para testar OCR local (PowerShell):
 

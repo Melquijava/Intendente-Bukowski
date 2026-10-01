@@ -109,7 +109,7 @@ class Flows(unittest.IsolatedAsyncioTestCase):
         self.s = Store(self.path,{100},{200},lambda:self.time)
         self.assertEqual(self.s.one('SELECT amount FROM payments WHERE id=?',(payment,))['amount'],6000)
         self.assertEqual(self.s.one('SELECT state FROM withdrawals WHERE id=?',(wid,))['state'],'sold')
-        self.assertEqual(self.s.one('SELECT COUNT(*) n FROM migrations')['n'],1)
+        self.assertEqual(self.s.one('SELECT COUNT(*) n FROM migrations')['n'],2)
 
     async def test_missing_rate_blocks_withdrawal(self):
         await self.member(); self.prices()
@@ -299,14 +299,15 @@ class DiscordSurface(unittest.IsolatedAsyncioTestCase):
         from bukowski.bot import Bukowski
         from bukowski.config import Config
         class Message:
-            def __init__(self,ident,text):
+            def __init__(self,ident,text,embed=None):
                 self.id,self.content,self.author = ident,text,Mock(id=999)
+                self.embeds = [embed] if embed else []
                 self.edit = AsyncMock()
         class Channel:
             def __init__(self,ident):
                 self.id,self.messages = ident,[]
-            async def send(self,text,**kwargs):
-                msg = Message(len(self.messages)+1,text)
+            async def send(self,text='',**kwargs):
+                msg = Message(len(self.messages)+1,text,kwargs.get('embed'))
                 self.messages.append(msg)
                 return msg
             async def fetch_message(self,ident):

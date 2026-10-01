@@ -1,0 +1,207 @@
+[
+  {
+    "footer": {
+      "text": "Intendente Bukowski • Guardião da Fazenda"
+    },
+    "fields": [
+      {
+        "inline": false,
+        "name": "O que trazer",
+        "value": "Nome do personagem • Documento no jogo • Número do pombo.\nDocumento e pombo são informações diferentes; mantenha os zeros iniciais."
+      },
+      {
+        "inline": false,
+        "name": "Seu primeiro passo",
+        "value": "Use **Apresentar documentos**. Seus dados seguem para a mesa privada da administração."
+      }
+    ],
+    "flags": 0,
+    "color": 1522986,
+    "type": "rich",
+    "description": "A estrada trouxe você até nossas porteiras. Aqui, o nome tem valor e a palavra fica no livro.\nApresente-se à Fazenda Bukowski e aguarde a análise da administração.",
+    "title": "AS PORTEIRAS DA BUKOWSKI"
+  },
+  {
+    "footer": {
+      "text": "Intendente Bukowski • Guardião da Fazenda"
+    },
+    "fields": [
+      {
+        "inline": false,
+        "name": "Cotações vigentes",
+        "value": "Tabela #1 • válida neste período"
+      },
+      {
+        "inline": false,
+        "name": "Produtos e preços",
+        "value": "**Chuchu** — $0.11\n**Alho** — $0.10\n**Inhame** — $0.09"
+      },
+      {
+        "inline": false,
+        "name": "Próximo reinício",
+        "value": "01/10/2026 às 12:00 • Brasília"
+      },
+      {
+        "inline": false,
+        "name": "Como trabalhar",
+        "value": "**1.** Registre as sementes retiradas.\n**2.** Confira e confirme a venda calculada.\n**3.** Entregue o repasse e informe quem recebeu.\nO caixa só recebe crédito após confirmação da gerência."
+      }
+    ],
+    "flags": 0,
+    "color": 1522986,
+    "type": "rich",
+    "description": "Da semente ao repasse, cada etapa tem seu lugar no livro da fazenda.",
+    "title": "LIVRO DE LABUTA"
+  },
+  {
+    "footer": {
+      "text": "Intendente Bukowski • Guardião da Fazenda"
+    },
+    "fields": [
+      {
+        "inline": true,
+        "name": "Cadastros em análise",
+        "value": "0"
+      },
+      {
+        "inline": true,
+        "name": "Repasses pendentes",
+        "value": "0"
+      },
+      {
+        "inline": true,
+        "name": "Entregas a confirmar",
+        "value": "0"
+      },
+      {
+        "inline": true,
+        "name": "Caixa efetivamente recebido",
+        "value": "$0.00"
+      },
+      {
+        "inline": true,
+        "name": "Taxa da fazenda",
+        "value": "30%"
+      },
+      {
+        "inline": false,
+        "name": "Revisão e histórico",
+        "value": "Cadastro e apelidos: /cadastros • /cadastro_tentar • /apelido_sincronizar\nPreços: /tabelas • /tabela reler • /tabela manual\nRevisões: /cadastro_corrigir • /retirada_cancelar • /ajuste • /estorno • /auditoria"
+      }
+    ],
+    "flags": 0,
+    "color": 11769944,
+    "type": "rich",
+    "description": "O livro guarda os nomes. O caixa guarda somente o dinheiro confirmado.",
+    "title": "MESA DO INTENDENTE"
+  },
+  {
+    "footer": {
+      "text": "Intendente Bukowski • Guardião da Fazenda"
+    },
+    "fields": [
+      {
+        "inline": true,
+        "name": "Chuchu",
+        "value": "$0.11"
+      },
+      {
+        "inline": true,
+        "name": "Alho",
+        "value": "$0.10"
+      },
+      {
+        "inline": true,
+        "name": "Inhame",
+        "value": "$0.09"
+      },
+      {
+        "inline": false,
+        "name": "Publicação",
+        "value": "<@1> • 01/10/2026 às 08:00 • Brasília"
+      },
+      {
+        "inline": false,
+        "name": "Validade",
+        "value": "Até 01/10/2026 às 12:00 • Brasília. O período usa a publicação no Discord."
+      },
+      {
+        "inline": false,
+        "name": "Origem",
+        "value": "Atualização manual auditada."
+      },
+      {
+        "inline": false,
+        "name": "Registro fiel",
+        "value": "A captura não comprova quando o print foi tirado no jogo."
+      }
+    ],
+    "flags": 0,
+    "color": 11769944,
+    "type": "rich",
+    "description": "Tabela #1 • Válida",
+    "title": "COTAÇÕES DO CONDADO"
+  },
+  {
+    "footer": {
+      "text": "Intendente Bukowski • Guardião da Fazenda"
+    },
+    "fields": [
+      {
+        "inline": true,
+        "name": "Produto",
+        "value": "Alho"
+      },
+      {
+        "inline": true,
+        "name": "Sementes",
+        "value": "200"
+      },
+      {
+        "inline": true,
+        "name": "Rendimento",
+        "value": "10 unidades/semente"
+      },
+      {
+        "inline": true,
+        "name": "Produção calculada",
+        "value": "2000 unidades"
+      },
+      {
+        "inline": true,
+        "name": "Preço vigente",
+        "value": "$0.10"
+      },
+      {
+        "inline": true,
+        "name": "Total calculado",
+        "value": "$200.00"
+      },
+      {
+        "inline": true,
+        "name": "Taxa da retirada",
+        "value": "30%"
+      },
+      {
+        "inline": true,
+        "name": "Parte da fazenda",
+        "value": "$60.00"
+      },
+      {
+        "inline": true,
+        "name": "Parte do funcionário",
+        "value": "$140.00"
+      },
+      {
+        "inline": false,
+        "name": "Antes de confirmar",
+        "value": "A confirmação fecha a retirada completa. O cálculo usa sementes, rendimento e cotação; não comprova a venda no jogo."
+      }
+    ],
+    "flags": 0,
+    "color": 11769944,
+    "type": "rich",
+    "description": "Retirada #1 • confira os valores antes de fechar o lote.",
+    "title": "ACERTO DA LABUTA"
+  }
+]

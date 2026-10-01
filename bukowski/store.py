@@ -20,6 +20,7 @@ class Actor:
 
 class Store:
     def __init__(self, path, admins=(), finance=(), clock=now):
+        self.path = Path(path)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, isolation_level=None, timeout=30)
         self.db.row_factory = sqlite3.Row
@@ -36,7 +37,15 @@ class Store:
         known = {int(file.name.split('_')[0]) for file in files}
         applied = {r['version'] for r in self.db.execute('SELECT version FROM migrations')}
         if applied - known:
-            raise DomainError('Banco usa uma vers?o mais nova; n?o fa?a downgrade do bot.')
+            raise DomainError('Banco usa uma versão mais nova; não faça downgrade do bot.')
+        if applied and known-applied:
+            backup_path = self.path.with_name(self.path.name + f'.pre-v{max(known)}.backup.sqlite3')
+            if not backup_path.exists():
+                backup = sqlite3.connect(backup_path)
+                try:
+                    self.db.backup(backup)
+                finally:
+                    backup.close()
         for file in files:
             version = int(file.name.split('_')[0])
             if version not in applied:
@@ -93,7 +102,13 @@ class Store:
         except sqlite3.IntegrityError:
             raise DomainError('Cadastro ativo duplicado ou documento em conflito. Solicite revisão administrativa.')
 
-    async def approve(self, actor, registration, grant_role):
+    def identity_result(self, actor, registration, operation, state, error=None):
+        column = 'role_state' if operation == 'role' else 'nickname_state'
+        with self.tx():
+            self.db.execute(f'UPDATE registrations SET {column}=?,sync_error=?,synced_at=? WHERE id=?',(state,error,self.clock().isoformat(),registration))
+            self.audit(actor,'cargo_peao' if operation == 'role' else 'apelido_sincronizado',{'registration':registration,'state':state,'error':error})
+
+    async def approve(self, actor, registration, grant_role, sync_nickname=None):
         self.admin(actor)
         async with self.approval_lock:
             row = self.one('SELECT * FROM registrations WHERE id=?', (registration,))
@@ -102,12 +117,29 @@ class Store:
             try:
                 await grant_role(row['user'])
             except Exception:
+                self.identity_result(actor,registration,'role','failed','Permissão/hierarquia ou falha da API ao conceder Peão.')
                 self.audit(actor,'cargo_falhou',{'registration':registration})
-                raise DomainError('Falha ao conceder P1. Cadastro continua pendente; corrija permissões e tente novamente.')
+                raise DomainError('Falha ao conceder Peão. Cadastro continua pendente; confira Gerenciar Cargos e hierarquia, depois tente novamente.')
+            self.identity_result(actor,registration,'role','granted')
+            row = self.one('SELECT * FROM registrations WHERE id=?',(registration,))
+            if sync_nickname is not None:
+                try:
+                    nickname_result = await sync_nickname(dict(row))
+                    if nickname_result is None:
+                        raise DomainError('O cargo atual não possui prefixo definido. Configure o mapa de apelidos antes de concluir a contratação.')
+                except Exception as error:
+                    detail = str(error) if isinstance(error,DomainError) else 'Permissão/hierarquia ou falha da API ao atualizar apelido.'
+                    self.identity_result(actor,registration,'nickname','failed',detail)
+                    raise DomainError(f'Peão concedido; apelido não concluído. {detail} Cadastro continua pendente. Use /cadastro_tentar.')
+                latest = self.one('SELECT * FROM registrations WHERE id=?',(registration,))
+                if (latest['name'],latest['document']) != (row['name'],row['document']):
+                    self.identity_result(actor,registration,'nickname','failed','Cadastro alterado durante a sincronização; tente novamente.')
+                    raise DomainError('Peão concedido; dados mudaram durante o ajuste do apelido. Use /cadastro_tentar.')
+                self.identity_result(actor,registration,'nickname','synced')
             with self.tx():
                 updated = self.db.execute("UPDATE registrations SET status='approved',decider=?,decided=? WHERE id=? AND status='pending'",(actor.id,self.clock().isoformat(),registration))
                 if not updated.rowcount:
-                    raise DomainError('O cadastro mudou durante a concessão de P1 (possível saída do servidor). Revise antes de tentar novamente.')
+                    raise DomainError('O cadastro mudou durante a concessão de Peão (possível saída do servidor). Revise antes de tentar novamente.')
                 self.audit(actor,'cadastro_aprovado',{'registration':registration})
             return row['user']
 
@@ -132,7 +164,7 @@ class Store:
             if not old:
                 raise DomainError('Cadastro inexistente.')
             try:
-                self.db.execute('UPDATE registrations SET name=?,document=?,mail=? WHERE id=?',(name,document,mail,registration))
+                self.db.execute("UPDATE registrations SET name=?,document=?,mail=?,nickname_state='pending',sync_error=NULL WHERE id=?",(name,document,mail,registration))
             except sqlite3.IntegrityError:
                 raise DomainError('Documento em conflito; resolva o cadastro duplicado antes.')
             self.audit(actor,'cadastro_corrigido',{'before':dict(old),'after':[name,document,mail],'reason':reason})
@@ -239,7 +271,7 @@ class Store:
                 raise DomainError('Total excede o limite financeiro suportado. Solicite revisão administrativa.')
             farm = int((Decimal(total)*Decimal(w['rate'])/100).quantize(Decimal('1'),rounding=ROUND_HALF_UP))
             cur = self.db.execute('INSERT INTO quotes(withdrawal,table_id,price,total,farm,created) VALUES(?,?,?,?,?,?)',(withdrawal,table['id'],price,total,farm,self.clock().isoformat()))
-            return {'id':cur.lastrowid,'withdrawal':withdrawal,'units':w['seeds']*w['yield'],'price':price,'total':total,'farm':farm,'employee':total-farm,'rate':w['rate']}
+            return {'id':cur.lastrowid,'withdrawal':withdrawal,'product':w['product'],'seeds':w['seeds'],'yield':w['yield'],'units':w['seeds']*w['yield'],'price':price,'total':total,'farm':farm,'employee':total-farm,'rate':w['rate']}
 
     def sell(self, actor, quote_id):
         self.approved(actor)
