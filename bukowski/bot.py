@@ -3,6 +3,7 @@ import json
 import logging
 import random
 import re
+import hashlib
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import discord
@@ -246,8 +247,19 @@ class Bukowski(discord.Client):
                     channel = self.get_channel(row['channel'])
                     message = await channel.fetch_message(row['message'])
                     embed = self.brand.panel(row['kind'],self.store)
-                    if not message.embeds or message.embeds[0].to_dict() != embed.to_dict() or message.content:
-                        await message.edit(content=None,embed=embed,view=Panel(self,row['kind']))
+                    path = self.brand.panel_asset(row['kind'])
+                    digest = hashlib.sha256(path.read_bytes()).hexdigest() if path else ''
+                    known_digest = self.store.get_setting('panel_art:'+row['kind']) or ''
+                    needs_art = digest != known_digest or (path and not any(a.filename == f"bukowski-{row['kind']}.png" for a in message.attachments))
+                    if not message.embeds or not self.brand.same_panel(message.embeds[0],embed) or message.content or needs_art:
+                        attachments = self.brand.panel_files(row['kind']) if needs_art else list(message.attachments)
+                        try:
+                            await message.edit(content=None,embed=embed,view=Panel(self,row['kind']),attachments=attachments)
+                        finally:
+                            for attachment in attachments:
+                                if isinstance(attachment,discord.File):
+                                    attachment.close()
+                        self.store.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('panel_art:'+row['kind'],digest))
                 except (discord.HTTPException,AttributeError):
                     log.warning('Painel %s indisponível; /instalar permite recuperá-lo',row['kind'])
 
@@ -602,10 +614,23 @@ class Bukowski(discord.Client):
                             msg = old
                             break
                 if msg:
-                    await msg.edit(content=None,embed=embed,view=Panel(self,kind))
+                    files = self.brand.panel_files(kind)
+                    try:
+                        await msg.edit(content=None,embed=embed,view=Panel(self,kind),attachments=files)
+                    finally:
+                        for file in files:
+                            file.close()
                 else:
-                    msg = await channel.send(embed=embed,view=Panel(self,kind))
+                    files = self.brand.panel_files(kind)
+                    try:
+                        msg = await channel.send(embed=embed,view=Panel(self,kind),files=files)
+                    finally:
+                        for file in files:
+                            file.close()
                 self.store.db.execute('INSERT OR REPLACE INTO panels VALUES(?,?,?)',(kind,channel.id,msg.id))
+                path = self.brand.panel_asset(kind)
+                digest = hashlib.sha256(path.read_bytes()).hexdigest() if path else ''
+                self.store.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('panel_art:'+kind,digest))
             self.store.audit(actor,'paineis_instalados',{})
         await answer(i,'Painéis instalados/atualizados sem duplicação. Nenhum canal foi alterado.')
 

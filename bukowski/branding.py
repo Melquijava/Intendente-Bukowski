@@ -1,6 +1,8 @@
 """Identidade Bukowski: verde profundo, ouro envelhecido e linguagem de livro-caixa."""
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
+from urllib.parse import urlsplit
 import discord
 from .periods import TZ, next_restart
 from .store import DomainError
@@ -9,6 +11,7 @@ GREEN = 0x173D2A
 GOLD = 0xB39858
 LEATHER = 0x75523B
 FOOTER = 'Intendente Bukowski • Guardião da Fazenda'
+ASSETS = Path(__file__).parent / 'assets'
 STATES = {'pending':'Em análise','approved':'Aprovado','rejected':'Recusado','departed':'Vínculo encerrado','reported':'Entrega informada','received':'Recebido','valid':'Válida','expired':'Período encerrado','processing':'Em leitura'}
 SYNC_STATES = {'not_attempted':'não tentado','granted':'concedido','failed':'falhou','synced':'sincronizado','pending':'pendente','unmapped':'prefixo não configurado'}
 
@@ -62,7 +65,33 @@ class Brand:
             rate = store.get_setting('rate')
             self.field(e,'Taxa da fazenda',f'{rate}%' if rate is not None else 'Não configurada — retiradas bloqueadas',True)
             self.field(e,'Revisão e histórico','Cadastro e apelidos: /cadastros • /cadastro_tentar • /apelido_sincronizar\nPreços: /tabelas • /tabela reler • /tabela manual\nRevisões: /cadastro_corrigir • /retirada_cancelar • /ajuste • /estorno • /auditoria')
+        asset = self.panel_asset(kind)
+        if asset:
+            e.set_image(url=f'attachment://bukowski-{kind}.png')
         return e
+
+    def panel_asset(self, kind):
+        if self.config.banner_url or kind not in ('service','work','admin'):
+            return None
+        path = ASSETS / f'{kind}.png'
+        return path if path.is_file() else None
+
+    def panel_files(self, kind):
+        path = self.panel_asset(kind)
+        return [discord.File(path,filename=f'bukowski-{kind}.png')] if path else []
+
+    @staticmethod
+    def same_panel(actual, expected):
+        def normalized(embed):
+            data = embed.to_dict()
+            for key in ('image','thumbnail'):
+                if key in data:
+                    url = data[key].get('url','')
+                    if not url.startswith('attachment://') and '/bukowski-' in url:
+                        url = 'attachment://' + urlsplit(url).path.rsplit('/',1)[-1]
+                    data[key] = {'url':url}
+            return data
+        return normalized(actual) == normalized(expected)
 
     def registration(self, row, avatar=None):
         e = self.embed(f"DOCUMENTOS À MESA • #{row['id']}",'Uma nova assinatura aguarda lugar no livro da Fazenda Bukowski.',GOLD)

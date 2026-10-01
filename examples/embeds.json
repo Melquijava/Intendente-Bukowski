@@ -3,6 +3,9 @@
     "footer": {
       "text": "Intendente Bukowski • Guardião da Fazenda"
     },
+    "image": {
+      "url": "attachment://bukowski-service.png"
+    },
     "fields": [
       {
         "inline": false,
@@ -24,6 +27,9 @@
   {
     "footer": {
       "text": "Intendente Bukowski • Guardião da Fazenda"
+    },
+    "image": {
+      "url": "attachment://bukowski-work.png"
     },
     "fields": [
       {
@@ -56,6 +62,9 @@
   {
     "footer": {
       "text": "Intendente Bukowski • Guardião da Fazenda"
+    },
+    "image": {
+      "url": "attachment://bukowski-admin.png"
     },
     "fields": [
       {

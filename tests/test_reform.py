@@ -176,6 +176,31 @@ class MigrationTests(unittest.TestCase):
             finally: store.db.close()
 
 class BrandTests(unittest.TestCase):
+    def test_discord_cdn_image_metadata_does_not_trigger_reupload(self):
+        import discord
+        config = Config('',1,{},2,frozenset({100}),frozenset({200}),'unused','eng','')
+        brand = Brand(config)
+        expected = brand.embed('Teste')
+        expected.set_image(url='attachment://bukowski-service.png')
+        data = expected.to_dict()
+        data['image'] = {'url':'https://cdn.discordapp.com/attachments/1/2/bukowski-service.png?ex=123','proxy_url':'https://media.discordapp.net/image','width':2172,'height':724}
+        actual = discord.Embed.from_dict(data)
+        self.assertTrue(brand.same_panel(actual,expected))
+        actual.description = 'Dados alterados'
+        self.assertFalse(brand.same_panel(actual,expected))
+
+    def test_panel_art_files_are_real_png_attachments(self):
+        config = Config('',1,{},2,frozenset({100}),frozenset({200}),'unused','eng','')
+        brand = Brand(config)
+        for kind in ('service','work','admin'):
+            files = brand.panel_files(kind)
+            try:
+                self.assertEqual(files[0].filename,f'bukowski-{kind}.png')
+                self.assertEqual(files[0].fp.read(8),b'\x89PNG\r\n\x1a\n')
+                self.assertLess(brand.panel_asset(kind).stat().st_size,8_000_000)
+            finally:
+                for file in files: file.close()
+
     def test_all_panels_and_financial_embed_obey_discord_limits(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Config('unused',1,{},2,frozenset({100}),frozenset({200}),str(Path(tmp)/'db'),'eng','')
@@ -189,7 +214,10 @@ class BrandTests(unittest.TestCase):
                     self.assertLessEqual(len(embed),6000)
                     self.assertLessEqual(len(embed.fields),25)
                     self.assertTrue(all(len(f.value)<=1024 for f in embed.fields))
-                    self.assertIsNone(embed.image.url)
+                    if embed.title in ('AS PORTEIRAS DA BUKOWSKI','LIVRO DE LABUTA','MESA DO INTENDENTE'):
+                        self.assertTrue(embed.image.url.startswith('attachment://bukowski-'))
+                    else:
+                        self.assertIsNone(embed.image.url)
                 self.assertEqual([e.title for e in embeds[:3]],['AS PORTEIRAS DA BUKOWSKI','LIVRO DE LABUTA','MESA DO INTENDENTE'])
             finally: store.db.close()
 
@@ -211,10 +239,36 @@ class ReaderTests(unittest.TestCase):
 
     def test_unavailable_distinct_from_invalid_format(self):
         reader = TesseractReader('eng',str(Path('missing-ocr.exe').resolve()))
-        with self.assertRaises(ReadingError) as result: reader.diagnose()
+        with patch('bukowski.ocr.resolve_tesseract',return_value=(None,'unavailable')):
+            with self.assertRaises(ReadingError) as result: reader.diagnose()
         self.assertEqual(result.exception.code,'ocr_unavailable')
         with self.assertRaises(ReadingError) as result: reader.read(b'not an image')
         self.assertEqual(result.exception.code,'unsupported_format')
+
+    def test_stale_windows_path_uses_host_path(self):
+        from bukowski.ocr_runtime import resolve_tesseract
+        with patch('bukowski.ocr_runtime.shutil.which',side_effect=lambda value:'/usr/bin/tesseract' if value=='tesseract' else None),patch('bukowski.ocr_runtime.Path.is_file',return_value=False):
+            command,source = resolve_tesseract(r'C:\outro-computador\tesseract.exe')
+        self.assertEqual((command,source),('/usr/bin/tesseract','path'))
+
+    def test_blank_config_resets_previous_global_command(self):
+        import pytesseract
+        reader = TesseractReader('eng','')
+        with patch('bukowski.ocr.resolve_tesseract',return_value=('host-tesseract','path')):
+            reader._activate()
+        self.assertEqual(pytesseract.pytesseract.tesseract_cmd,'host-tesseract')
+
+    def test_verduras_is_accessory_not_product(self):
+        text = 'EM ALTA\nAlmeirão\nVERDURAS · VOCÊ TEM:\n$0.11\nMaxixe\nLEGUMES · VOCÊ TEM:\n$0.11\nRabanete\nVERDURAS · VOCÊ TEM:\n$0.11'
+        self.assertEqual(parse_shop_text(text),{'almeirão':11,'maxixe':11,'rabanete':11})
+
+    def test_invalid_config_falls_back_and_reads_real_image(self):
+        command = os.environ.get('TESSERACT_CMD')
+        if not command: self.skipTest('Configure TESSERACT_CMD')
+        reader = TesseractReader('por+eng',r'Z:\caminho-inexistente\tesseract.exe')
+        with patch('bukowski.ocr.resolve_tesseract',return_value=(command,'path')):
+            _,prices = reader.read(Path('tests/fixtures/reference.png').read_bytes())
+        self.assertEqual(prices,{'chuchu':11,'alho':10,'inhame':9})
 
     def test_cards_without_inventory_subtitle(self):
         command = os.environ.get('TESSERACT_CMD')

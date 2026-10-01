@@ -4,6 +4,8 @@ Primeira etapa para a Fazenda Bukowski no Eldorado Roleplay (RedM). Python 3.11+
 
 Atualizando uma instalação existente? Siga [ATUALIZACAO.md](ATUALIZACAO.md): migração preservando o banco, cargo Peão, apelidos por função e os novos painéis. Veja os conteúdos finais em [EMBEDS.md](EMBEDS.md).
 
+Os três painéis já incluem artes originais em `bukowski/assets/`: atendimento (`service.png`), trabalho (`work.png`) e administração (`admin.png`). O bot envia cada PNG como anexo e o usa no embed, sem hospedagem externa. Conceda **Anexar arquivos** nos três canais. Reiniciar atualiza painéis existentes; `/instalar` instala/recupera os painéis. Atualizações de dados preservam o anexo, sem reupload repetido. `BRAND_BANNER_URL` preenchida substitui as artes locais por um banner externo.
+
 ## Instalação local
 
 No PowerShell, dentro deste projeto:

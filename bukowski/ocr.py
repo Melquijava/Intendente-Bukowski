@@ -3,10 +3,12 @@ import re
 import unicodedata
 import threading
 import time
+import logging
 from decimal import Decimal
 from typing import Protocol
 from PIL import Image, ImageOps, UnidentifiedImageError
 import pytesseract
+from .ocr_runtime import resolve_tesseract
 
 def product(value):
     return unicodedata.normalize("NFC", value.strip().casefold())
@@ -18,7 +20,7 @@ class ReadingError(ValueError):
 
 def accessory(line):
     plain = ''.join(c for c in unicodedata.normalize('NFD',line.casefold()) if not unicodedata.combining(c)).strip()
-    return bool(re.fullmatch(r'(?:em\s+alta|vender|(?:legumes|ervas|frutas|vegetais)\b.*|voce\s+tem\b.*|[\d\s:·.-]+)',plain))
+    return bool(re.fullmatch(r'(?:em\s+alta|vender|(?:legumes|ervas|frutas|vegetais|verduras)\b.*|voce\s+tem\b.*|[\d\s:·.-]+)',plain))
 
 def names_from(text):
     return [line.strip() for line in text.splitlines() if line.strip() and not accessory(line)]
@@ -67,10 +69,21 @@ class TesseractReader:
     def __init__(self, lang="por+eng", command=""):
         self.lang = lang
         self._timing = threading.local()
-        if command:
-            pytesseract.pytesseract.tesseract_cmd = command
+        self.configured_command = command
+        self.command_source = None
+
+    def _activate(self):
+        command,source = resolve_tesseract(self.configured_command)
+        if not command:
+            raise ReadingError('ocr_unavailable','Tesseract não encontrado neste ambiente. Administração: use /ocr_diagnostico e configure o executável local; no Railway, use o Dockerfile do projeto.')
+        if self.configured_command and source != 'configured' and source != self.command_source:
+            logging.getLogger(__name__).warning('TESSERACT_CMD indisponível neste ambiente; usando detecção automática (%s).',source)
+        self.command_source = source
+        pytesseract.pytesseract.tesseract_cmd = command
+        return command
 
     def diagnose(self):
+        command = self._activate()
         try:
             version = str(pytesseract.get_tesseract_version()).splitlines()[0]
             languages = pytesseract.get_languages()
@@ -78,7 +91,7 @@ class TesseractReader:
             raise ReadingError('ocr_unavailable','O leitor não está instalado ou configurado. Revise TESSERACT_CMD.')
         if set(self.lang.split('+'))-set(languages):
             raise ReadingError('ocr_unavailable','Faltam idiomas configurados no Tesseract.',diagnostic=f'Idiomas disponíveis: {", ".join(languages)}')
-        return {'version':version,'languages':languages}
+        return {'version':version,'languages':languages,'source':self.command_source,'executable':command}
 
     def _text(self, image, psm=6, variant='gray'):
         image = ImageOps.grayscale(image)
@@ -197,6 +210,7 @@ class TesseractReader:
                 raise ReadingError('unsupported_format','Formato não suportado. Envie PNG, JPEG ou WebP.')
             if image.width * image.height > 16_000_000:
                 raise ValueError("Imagem excede 16 milhões de pixels.")
+            self._activate()
             game = self._game_rows(image)
             if game is not None:
                 return game

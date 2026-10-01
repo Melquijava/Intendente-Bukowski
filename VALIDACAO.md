@@ -2,7 +2,7 @@
 
 Executado em 01/10/2026 com Python 3.11.9, discord.py 2.7.1 e Tesseract 5.5.3 (modelos por+eng). Dependências isoladas em `.venv`; OCR local em `.tools/tesseract`, ignorado pelo Git. Não foi usado token Discord.
 
-- 53 testes automatizados passaram, sem testes pulados, incluindo OCR real das imagens sintéticas com Chuchu/Alho/Inhame e Junco/Romã/Pitanga, cabeçalho, rótulos e botões Vender.
+- 59 testes automatizados passaram, sem testes pulados, incluindo OCR real das imagens sintéticas com Chuchu/Alho/Inhame e Junco/Romã/Pitanga, cabeçalho, rótulos e botões Vender.
 - Cadastro autorizado/não autorizado; concessão de Peão com falha e nova tentativa; decisão simultânea; saída durante aprovação; conflitos de documento e correção auditada.
 - Persistência e migração inicial; instalação idempotente de painéis e recuperação de envio interrompido usando Discord simulado.
 - Limites 06h/12h/18h, noite atravessando meia-noite, conversão UTC, bot retomando após reinício perdido.
@@ -16,6 +16,8 @@ Executado em 01/10/2026 com Python 3.11.9, discord.py 2.7.1 e Tesseract 5.5.3 (m
 - OCR sem VOCÊ TEM, sem quantidade e sem relógio; referência sintética em 900 e 685 pixels; categorias de OCR indisponível, formato inválido e falha de download; nenhum detalhe privado na resposta pública.
 - Backend visual Gemini: implementação HTTP real, contrato de transporte testado com resposta controlada, chave ausente e resposta incompleta rejeitadas. Nenhuma chamada real ao provedor foi realizada.
 - Embeds: conteúdos exportados em EMBEDS.md e examples/embeds.json; testes de limites de campos/caracteres e persistência. Não houve validação visual no Discord.
+- Artes dos painéis: três PNGs gerados com ImageGen e inspecionados visualmente; integrados por anexos locais. Testes de arquivos PNG/tamanho e comparação das URLs de anexos convertidas pelo Discord para CDN, evitando reupload a cada atualização. A renderização final no Discord permanece sem validação.
+- Disponibilidade OCR: caminho Windows inválido com executável disponível no PATH; configuração vazia não herda caminho global anterior; imagem real de fixture lida após fallback. Detecção local sem TESSERACT_CMD e com caminho inexistente confirmada pelo executável instalado. “VERDURAS” passa a ser texto acessório, sem virar produto. A instalação no ambiente remoto do usuário não foi inspecionada.
 
 Comando usado para testar OCR local (PowerShell):
 
