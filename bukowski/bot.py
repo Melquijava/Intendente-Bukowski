@@ -256,19 +256,26 @@ class Bukowski(discord.Client):
         return '\n'.join(f"#{r['id']} — funcionário {r['user']}: {money(r['amount'])}; {r['state']}" for r in rows) or 'Nenhum repasse pendente.'
 
     async def on_message(self, message):
+        await self.process_prices(message)
+
+    async def process_prices(self, message, retry=None):
         if message.author.bot or not message.guild or message.guild.id != self.config.guild or message.channel.id != self.config.channels['PRICES_CHANNEL']:
             return
         attachments = [a for a in message.attachments if (a.content_type or '').startswith('image/') or a.filename.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
         if not attachments:
+            if retry is not None:
+                raise DomainError('A mensagem não possui mais a imagem original.')
             return
         try:
             self.validate_channels(message.guild)
         except DomainError:
             log.exception('Leitura bloqueada por configuração insegura')
+            if retry is not None:
+                raise
             return
         member = await message.guild.fetch_member(message.author.id)
         actor = Actor(member.id,frozenset(r.id for r in member.roles))
-        tid = self.store.begin_table(message.id,actor,json.dumps([{'id':a.id,'url':a.url,'filename':a.filename} for a in attachments]),message.created_at)
+        tid = retry if retry is not None else self.store.begin_table(message.id,actor,json.dumps([{'id':a.id,'url':a.url,'filename':a.filename} for a in attachments]),message.created_at)
         if tid is None:
             return
         raw, prices, error = '', {}, None
@@ -282,9 +289,10 @@ class Bukowski(discord.Client):
             error = str(exc)[:1000]
             raw = getattr(exc,'raw_text','')
         state = self.store.finish_table(tid,actor,raw,prices,error)
+        states = {'valid':'validada','pending':'aguardando revisão','expired':'fora do período atual'}
         table = '\n'.join(f'{p}: {money(c)}' for p,c in prices.items())
         try:
-            await message.reply((f'Tabela #{tid}: {state}.\n' + (table if prices else 'Leitura não validada.') + '\nA vigência usa a publicação; o horário da captura no jogo não é comprovado.\n' + ('Gerência: corrija em /tabela manual.' if state != 'valid' else ''))[:1950],mention_author=False)
+            await message.reply((f'Tabela #{tid}: {states.get(state,state)}.\n' + (table if prices else 'Não foi possível ler com segurança todos os produtos e preços.') + '\nA vigência usa a publicação; o horário da captura no jogo não é comprovado.\n' + ('Gerência: consulte o motivo em /tabelas; use /tabela reler ou /tabela manual.' if state != 'valid' else ''))[:1950],mention_author=False)
             if state == 'pending':
                 await self.get_channel(self.config.channels['LOG_CHANNEL']).send(f'Tabela #{tid} pendente: {message.jump_url}. {error or "Autor sem cargo administrativo"}. Use /tabelas e /tabela manual.')
         except discord.HTTPException:
@@ -430,6 +438,27 @@ class Bukowski(discord.Client):
         @tabela.command(name='manual',description='Abre formulário de publicação ou correção')
         async def table_manual(i:discord.Interaction):
             await self.action(i,'table')
+        @tabela.command(name='reler',description='Tenta ler novamente uma imagem pendente do período atual')
+        async def table_retry(i:discord.Interaction,tabela_id:int):
+            a = await self.actor(i)
+            s.admin(a)
+            row = s.one('SELECT * FROM tables WHERE id=?',(tabela_id,))
+            if not row or row['state'] != 'pending' or row['period'] != period(now()) or not row['message']:
+                raise DomainError('Somente imagem pendente do período atual pode ser relida.')
+            await i.response.defer(ephemeral=True)
+            message = await self.get_channel(self.config.channels['PRICES_CHANNEL']).fetch_message(int(row['message']))
+            with s.tx():
+                changed = s.db.execute("UPDATE tables SET state='processing' WHERE id=? AND state='pending'",(tabela_id,))
+                if not changed.rowcount:
+                    raise DomainError('Tabela já está em processamento ou foi decidida.')
+                s.audit(a,'tabela_releitura_solicitada',{'id':tabela_id,'before':{'raw':row['raw'],'error':row['error'],'prices':row['prices'],'state':row['state']}})
+            try:
+                await self.process_prices(message,retry=tabela_id)
+            except Exception:
+                s.db.execute("UPDATE tables SET state='pending',error='Releitura interrompida' WHERE id=? AND state='processing'",(tabela_id,))
+                raise
+            result = s.one('SELECT state,error FROM tables WHERE id=?',(tabela_id,))
+            await answer(i,f"Releitura concluída: {result['state']}. {result['error'] or ''}")
         tree.add_command(tabela)
 
         @tree.command(name='precos',description='Consulta preços do período atual')

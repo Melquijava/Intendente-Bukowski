@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 import shutil
 import tempfile
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from PIL import Image, ImageDraw
 from bukowski.store import Store, Actor, DomainError
 from bukowski.periods import TZ, period
 from bukowski.ocr import parse_prices, TesseractReader
@@ -247,6 +249,33 @@ class PeriodTests(unittest.TestCase):
         with self.assertRaises(ValueError): period(datetime(2026,10,1))
 
 class OCRTests(unittest.TestCase):
+    def game_reader(self):
+        command = os.environ.get('TESSERACT_CMD','') or shutil.which('tesseract')
+        if not command:
+            self.skipTest('Tesseract não instalado')
+        return TesseractReader(os.environ.get('OCR_LANG','por+eng'),command)
+
+    def test_game_cards_with_header_subtitles_and_sell_buttons(self):
+        reader = self.game_reader()
+        _,prices = reader.read(Path('tests/fixtures/game_cards.png').read_bytes())
+        self.assertEqual(prices,{'junco':11,'romã':11,'pitanga':9})
+
+    def test_game_card_missing_badge_rejects_whole_table(self):
+        reader = self.game_reader()
+        with Image.open('tests/fixtures/game_cards.png') as image:
+            ImageDraw.Draw(image).rectangle((735,220,805,260),fill=(49,57,72))
+            buffer = io.BytesIO(); image.save(buffer,format='PNG')
+        with self.assertRaisesRegex(ValueError,'cartões'):
+            reader.read(buffer.getvalue())
+
+    def test_game_card_unreadable_price_rejects_whole_table(self):
+        reader = self.game_reader()
+        with Image.open('tests/fixtures/game_cards.png') as image:
+            ImageDraw.Draw(image).rectangle((744,227,797,248),fill=(30,126,73))
+            buffer = io.BytesIO(); image.save(buffer,format='PNG')
+        with self.assertRaises(ValueError):
+            reader.read(buffer.getvalue())
+
     def test_reference_text_and_decimal_comma(self):
         self.assertEqual(parse_prices('Chuchu: $0.11\nAlho: $0,10\nInhame: $0.09'),{'chuchu':11,'alho':10,'inhame':9})
 
